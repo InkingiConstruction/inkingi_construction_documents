@@ -1,74 +1,13 @@
-# InkingiPro - Complete Database Design & API Structure
+# InkingiPro Database Architecture
 
-**Version:** 1.0
-**Status:** Final
-**Date:** May 22, 2026
-**Database:** PostgreSQL 15+
-**ORM:** Prisma
-**API:** REST (Node.js + Express)
-
----
-
-## Part 1: Complete Database Schema Reference
-
-### 1.1 All Tables in the System (18 Tables Total)
-
-| # | Table Name | Purpose | Role Access |
-|---|------------|---------|-------------|
-| 1 | `users` | All user accounts | All roles |
-| 2 | `user_sessions` | Active login sessions | System |
-| 3 | `kyc_documents` | KYC upload records | All + Admin |
-| 4 | `projects` | Construction projects | Client, Engineer, Supervisor, Supplier, Admin |
-| 5 | `project_members` | User assignments to projects | System |
-| 6 | `milestones` | Project milestones/payment gates | Client, Engineer, Supervisor, Admin |
-| 7 | `boq_items` | Bill of Quantities line items | Engineer, Client, Admin |
-| 8 | `escrow_accounts` | Escrow balance per project | Client, Engineer, Admin |
-| 9 | `transactions` | All financial transactions | Client, Engineer, Admin |
-| 10 | `rfqs` | Request for Quotes (supply chain) | Engineer, Supplier, Admin |
-| 11 | `quotes` | Supplier quotes for RFQs | Supplier, Engineer, Admin |
-| 12 | `purchase_orders` | Approved purchase orders | Engineer, Supplier, Admin |
-| 13 | `deliveries` | Material delivery tracking | Supplier, Engineer, Supervisor, Admin |
-| 14 | `progress_photos` | Daily progress photos/videos | Engineer, Client, Admin |
-| 15 | `inspections` | Supervisor inspection reports | Supervisor, Client, Engineer, Admin |
-| 16 | `disputes` | Dispute cases | All roles + Admin |
-| 17 | `dispute_evidence` | Evidence uploaded for disputes | All roles + Admin |
-| 18 | `audit_logs` | System audit trail | Admin only |
-| 19 | `notifications` | Push/email/SMS notification queue | System |
-| 20 | `system_settings` | Platform configuration | Admin only |
-
----
-
-### 1.2 Additional Models Not in Original SRS (Added)
-
-Based on real-world implementation needs, these models are **missing** from the original SRS and are added here:
-
-| Added Table | Why It's Needed |
-|-------------|-----------------|
-| `user_sessions` | Track active sessions for security (logout, force logout) |
-| `project_members` | Many-to-many relationship for project assignments (supports multiple engineers/supervisors per project) |
-| `purchase_orders` | Separate from quotes for audit trail after selection |
-| `dispute_evidence` | One-to-many evidence per dispute (not just JSONB array) |
-| `system_settings` | Runtime configuration without redeployment |
-| `refresh_tokens` | JWT refresh token management (Better Auth replacement) |
-| `password_resets` | Track password reset requests with expiry |
-| `email_templates` | Editable email templates for admin |
-| `api_keys` | For supplier/external system integration |
-| `activity_logs` | User activity tracking (lighter than audit_logs) |
-
----
-
-## Part 2: Prisma Schema Models (Complete)
+## Unified Database Architecture
 
 ```prisma
 // ============================================================================
-// 📄 FILE HEADER COMMENT
-// ============================================================================
-// FILE NAME        : schema.prisma
-// WHAT THIS FILE DOES : Complete database schema for InkingiPro platform
-// HOW IT DOES IT      : Defines 20+ tables with relations, indexes, and enums
-// DATA SOURCE         : None - this is the source of truth for database structure
-// DATA DESTINATION    : Migrated to PostgreSQL via `prisma migrate dev`
-// PRINCIPLE APPLIED   : DRY (Centralized schema used by all services)
+// FILE: schema.prisma
+// DATABASE: PostgreSQL 15+
+// ORM: Prisma 5+
+// TABLES: 25 Tables
 // ============================================================================
 
 generator client {
@@ -81,7 +20,7 @@ datasource db {
 }
 
 // ============================================================================
-// ENUMS (Shared across multiple tables)
+// ENUMS
 // ============================================================================
 
 enum UserRole {
@@ -111,8 +50,9 @@ enum ProjectStatus {
 enum MilestoneStatus {
   pending
   active
-  completed
+  pending_supervisor
   revision_required
+  awaiting_client_payment
   paid
 }
 
@@ -122,6 +62,8 @@ enum TransactionType {
   refund
   freeze
   unfreeze
+  auto_payment
+  penalty
 }
 
 enum TransactionStatus {
@@ -129,6 +71,40 @@ enum TransactionStatus {
   completed
   failed
   reversed
+}
+
+enum PaymentMethod {
+  mtn_momo
+  airtel_money
+  bank_transfer
+}
+
+enum RfqStatus {
+  open
+  closed
+  cancelled
+}
+
+enum QuoteStatus {
+  pending_selection
+  selected
+  rejected
+}
+
+enum PurchaseOrderStatus {
+  issued
+  accepted
+  shipped
+  completed
+}
+
+enum DeliveryStatus {
+  preparing
+  in_transit
+  delivered
+  pending_confirmation
+  confirmed
+  rejected
 }
 
 enum DisputeStatus {
@@ -141,9 +117,16 @@ enum DisputeStatus {
   closed
 }
 
+enum DisputeCategory {
+  quality
+  timeline
+  cost
+  other
+}
+
 enum NotificationChannel {
-  email
   push
+  email
   sms
   in_app
 }
@@ -156,937 +139,1515 @@ enum NotificationStatus {
   read
 }
 
+enum AssignmentStatus {
+  pending
+  accepted
+  declined
+  removed
+}
+
+enum InspectionDecision {
+  approved
+  revision_required
+}
+
+enum KycDocumentType {
+  national_id
+  passport
+  ier_license
+  indemnity_insurance
+  business_registration
+  tax_compliance
+  certification
+}
+
+enum KycDocumentStatus {
+  pending
+  approved
+  rejected
+}
+
 // ============================================================================
-// TABLE 1: users
+// TABLE 1: User
 // ============================================================================
 
 model User {
-  id                       String              @id @default(uuid())
-  email                    String              @unique
-  phone                    String              @unique
-  password_hash            String
-  full_name                String
-  role                     UserRole
-  profile_picture_url      String?
+  id                       String                 @id @default(uuid())
+  name                     String
+  email                    String                 @unique
+  phoneNumber              String                 @unique
+  emailVerified            Boolean                @default(false)
+  phoneNumberVerified      Boolean                @default(false)
+  passwordHash             String
+  image                    String?
+  role                     UserRole               @default(client)
   
   // KYC Fields
-  kyc_status               KYCStatus           @default(pending)
-  kyc_submitted_at         DateTime?
-  kyc_reviewed_at          DateTime?
-  kyc_reviewed_by          String?
-  kyc_rejection_reason     String?
+  kycStatus                KYCStatus              @default(pending)
+  kycSubmittedAt           DateTime?
+  kycReviewedAt            DateTime?
+  kycReviewedBy            String?
+  kycRejectionReason       String?
   
   // Engineer-specific
-  ier_license_number       String?
-  ier_license_expiry       DateTime?
-  ier_license_verified     Boolean             @default(false)
-  professional_indemnity_url String?
+  ierLicenseNumber         String?                @unique
+  ierLicenseExpiry         DateTime?
+  ierLicenseVerified       Boolean                @default(false)
+  professionalIndemnityUrl String?
   
   // Supplier-specific
-  business_registration_number String?
-  tax_compliance_number    String?
-  business_registration_url String?
-  tax_certificate_url      String?
-  
-  // Verification flags
-  email_verified           Boolean             @default(false)
-  phone_verified           Boolean             @default(false)
+  businessRegistrationNumber String?               @unique
+  taxComplianceNumber      String?
+  businessRegistrationUrl  String?
+  taxCertificateUrl        String?
   
   // Account status
-  is_active                Boolean             @default(true)
-  is_suspended             Boolean             @default(false)
-  suspension_reason        String?
-  suspended_until          DateTime?
+  isActive                 Boolean                @default(true)
+  isSuspended              Boolean                @default(false)
+  suspensionReason         String?
+  suspendedUntil           DateTime?
+  banned                   Boolean?               @default(false)
+  banReason                String?
+  banExpires               DateTime?
   
   // Preferences
-  notification_preferences Json                @default("{}")
-  locale                   String              @default("en")
-  currency_preference      String              @default("RWF")
+  notificationPrefs        Json                   @default("{}")
+  locale                   String                 @default("en")
+  currencyPreference       String                 @default("RWF")
+  fcmToken                 String?
   
   // Timestamps
-  created_at               DateTime            @default(now())
-  updated_at               DateTime            @updatedAt
-  last_login_at            DateTime?
+  createdAt                DateTime               @default(now())
+  updatedAt                DateTime               @updatedAt
+  lastLoginAt              DateTime?
   
   // Relations
-  projects_as_client       Project[]           @relation("ClientProjects")
-  projects_as_engineer     Project[]           @relation("EngineerProjects")
-  project_members          ProjectMember[]
-  kyc_documents            KYCDocument[]
-  milestones_created       Milestone[]         @relation("CreatedBy")
+  sessions                 Session[]
+  accounts                 Account[]
+  kycDocuments             KycDocument[]
+  
+  clientProjects           Project[]              @relation("ClientProjects")
+  engineerProjects         Project[]              @relation("EngineerProjects")
+  projectMembers           ProjectMember[]
+  
+  milestonesCreated        Milestone[]            @relation("CreatedBy")
   transactions             Transaction[]
-  rfqs_created             RFQ[]               @relation("RFQCreatedBy")
-  quotes_submitted         Quote[]             @relation("QuoteSubmittedBy")
-  purchase_orders          PurchaseOrder[]
+  
+  rfqsCreated              Rfq[]                  @relation("RFQCreatedBy")
+  quotesSubmitted          Quote[]                @relation("QuoteSubmittedBy")
+  purchaseOrders           PurchaseOrder[]
   deliveries               Delivery[]
-  progress_photos          ProgressPhoto[]
+  progressPhotos           ProgressPhoto[]
   inspections              Inspection[]
-  disputes_raised          Dispute[]           @relation("DisputeRaisedBy")
-  dispute_evidence         DisputeEvidence[]
-  audit_logs               AuditLog[]
+  
+  disputesRaised           Dispute[]              @relation("DisputeRaisedBy")
+  disputeEvidence          DisputeEvidence[]
+  
+  auditLogs                AuditLog[]
+  activityLogs             ActivityLog[]
   notifications            Notification[]
-  sessions                 UserSession[]
-  refresh_tokens           RefreshToken[]
-  password_resets          PasswordReset[]
-  api_keys                 ApiKey[]
-  activity_logs            ActivityLog[]
+  apiKeys                  ApiKey[]
+  
+  refreshTokens            RefreshToken[]
+  passwordResets           PasswordReset[]
 
   @@index([email])
-  @@index([phone])
+  @@index([phoneNumber])
   @@index([role])
-  @@index([kyc_status])
+  @@index([kycStatus])
   @@map("users")
 }
 
 // ============================================================================
-// TABLE 2: user_sessions
+// TABLE 2: Session (Better Auth)
 // ============================================================================
 
-model UserSession {
-  id           String   @id @default(uuid())
-  user_id      String
-  token        String   @unique
-  device_info  Json?    // Device fingerprint, OS, browser
-  ip_address   String?
-  expires_at   DateTime
-  created_at   DateTime @default(now())
-  revoked_at   DateTime?
-  
-  user         User     @relation(fields: [user_id], references: [id], onDelete: CASCADE)
-  
-  @@index([user_id])
-  @@index([token])
-  @@index([expires_at])
-  @@map("user_sessions")
+model Session {
+  id             String   @id
+  expiresAt      DateTime
+  token          String   @unique
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  ipAddress      String?
+  userAgent      String?
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  impersonatedBy String?
+
+  @@index([userId])
+  @@map("sessions")
 }
 
 // ============================================================================
-// TABLE 3: refresh_tokens
+// TABLE 3: Account (Better Auth)
+// ============================================================================
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("accounts")
+}
+
+// ============================================================================
+// TABLE 4: Verification (Better Auth)
+// ============================================================================
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verifications")
+}
+
+// ============================================================================
+// TABLE 5: RefreshToken
 // ============================================================================
 
 model RefreshToken {
   id         String   @id @default(uuid())
-  user_id    String
+  userId     String
   token      String   @unique
-  expires_at DateTime
+  expiresAt  DateTime
   revoked    Boolean  @default(false)
-  created_at DateTime @default(now())
+  createdAt  DateTime @default(now())
   
-  user       User     @relation(fields: [user_id], references: [id], onDelete: CASCADE)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   
-  @@index([user_id])
+  @@index([userId])
   @@index([token])
   @@map("refresh_tokens")
 }
 
 // ============================================================================
-// TABLE 4: password_resets
+// TABLE 6: PasswordReset
 // ============================================================================
 
 model PasswordReset {
   id         String   @id @default(uuid())
-  user_id    String
+  userId     String
   token      String   @unique
-  expires_at DateTime
-  used_at    DateTime?
-  created_at DateTime @default(now())
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime @default(now())
   
-  user       User     @relation(fields: [user_id], references: [id], onDelete: CASCADE)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   
-  @@index([user_id])
+  @@index([userId])
   @@index([token])
   @@map("password_resets")
 }
 
 // ============================================================================
-// TABLE 5: kyc_documents
+// TABLE 7: KycDocument
 // ============================================================================
 
-model KYCDocument {
-  id             String     @id @default(uuid())
-  user_id        String
-  document_type  String     // national_id, ier_license, insurance, business_reg, tax_cert
-  cloudinary_url  String
-  cloudinary_public_id String
-  status         String     @default("pending") // pending, approved, rejected
-  reviewed_by    String?
-  reviewed_at    DateTime?
-  rejection_reason String?
-  created_at     DateTime   @default(now())
+model KycDocument {
+  id                   String            @id @default(uuid())
+  userId               String
+  type                 KycDocumentType
+  cloudinaryUrl        String
+  cloudinaryPublicId   String
+  status               KycDocumentStatus @default(pending)
+  reviewedBy           String?
+  reviewedAt           DateTime?
+  rejectionReason      String?
+  createdAt            DateTime          @default(now())
   
-  user           User       @relation(fields: [user_id], references: [id], onDelete: CASCADE)
+  user                 User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   
-  @@index([user_id])
+  @@unique([userId, type])
+  @@index([userId])
   @@index([status])
   @@map("kyc_documents")
 }
 
 // ============================================================================
-// TABLE 6: projects
+// TABLE 8: Project
 // ============================================================================
 
 model Project {
-  id               String         @id @default(uuid())
-  client_id        String
-  engineer_id      String?
-  name             String
-  description      String?
-  budget           Int            // In RWF (smallest unit)
-  address          String
-  gps_boundary     Json?          // GeoJSON polygon
-  status           ProjectStatus  @default(draft)
-  start_date       DateTime?
-  end_date         DateTime?
-  site_photos      Json?          // Array of Cloudinary URLs
-  plans_urls       Json?          // Array of Cloudinary URLs (PDFs)
-  created_at       DateTime       @default(now())
-  updated_at       DateTime       @updatedAt
+  id                 String        @id @default(uuid())
+  name               String
+  description        String?
+  status             ProjectStatus @default(draft)
+  budget             Decimal       @db.Decimal(15, 2)
+  currency           String        @default("RWF")
+  address            String?
+  gpsBoundary        Json?
+  sitePhotos         Json          @default("[]")
+  architecturalPlans Json          @default("[]")
+  startDate          DateTime?
+  endDate            DateTime?
   
+  clientId           String
+  client             User          @relation("ClientProjects", fields: [clientId], references: [id])
+  engineerId         String?
+  engineer           User?         @relation("EngineerProjects", fields: [engineerId], references: [id])
+  
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
   // Relations
-  client           User           @relation("ClientProjects", fields: [client_id], references: [id])
-  engineer         User?          @relation("EngineerProjects", fields: [engineer_id], references: [id])
-  project_members  ProjectMember[]
-  milestones       Milestone[]
-  escrow_account   EscrowAccount?
-  transactions     Transaction[]
-  rfqs             RFQ[]
-  progress_photos  ProgressPhoto[]
-  disputes         Dispute[]
-  audit_logs       AuditLog[]
-  
-  @@index([client_id])
-  @@index([engineer_id])
+  milestones         Milestone[]
+  escrowAccount      EscrowAccount?
+  projectMembers     ProjectMember[]
+  rfqs               Rfq[]
+  progressPhotos     ProgressPhoto[]
+  disputes           Dispute[]
+  messages           Message[]
+  auditLogs          AuditLog[]
+
+  @@index([clientId])
+  @@index([engineerId])
   @@index([status])
   @@map("projects")
 }
 
 // ============================================================================
-// TABLE 7: project_members (Many-to-many for multiple assignments)
+// TABLE 9: ProjectMember
 // ============================================================================
 
 model ProjectMember {
-  id           String   @id @default(uuid())
-  project_id   String
-  user_id      String
-  role         String   // supervisor, supplier, additional_engineer
-  status       String   @default("pending") // pending, active, declined, removed
-  invited_at   DateTime @default(now())
-  accepted_at  DateTime?
-  removed_at   DateTime?
+  id          String           @id @default(uuid())
+  projectId   String
+  userId      String
+  role        String
+  status      AssignmentStatus @default(pending)
+  invitedAt   DateTime         @default(now())
+  acceptedAt  DateTime?
+  removedAt   DateTime?
   
-  project      Project  @relation(fields: [project_id], references: [id], onDelete: CASCADE)
-  user         User     @relation(fields: [user_id], references: [id], onDelete: CASCADE)
+  project     Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   
-  @@unique([project_id, user_id])
-  @@index([project_id])
-  @@index([user_id])
+  @@unique([projectId, userId])
+  @@index([projectId])
+  @@index([userId])
   @@index([status])
   @@map("project_members")
 }
 
 // ============================================================================
-// TABLE 8: milestones
+// TABLE 10: Milestone
 // ============================================================================
 
 model Milestone {
   id                 String          @id @default(uuid())
-  project_id         String
-  title              String
+  projectId          String
+  engineerId         String
+  name               String
   description        String?
-  budget_percentage  Int             // 1-100
-  duration_days      Int?
-  acceptance_criteria String?
-  depends_on         String?         // FK to another milestone
+  budgetPercentage   Decimal         @db.Decimal(5, 2)
+  durationDays       Int?
+  acceptanceCriteria String?
+  dependsOn          String?
+  order              Int
   status             MilestoneStatus @default(pending)
-  order_index        Int             // Display order
-  created_by         String
-  created_at         DateTime        @default(now())
-  updated_at         DateTime        @updatedAt
-  completed_at       DateTime?
-  paid_at            DateTime?
-  
+  completedAt        DateTime?
+  paidAt             DateTime?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
   // Relations
-  project            Project         @relation(fields: [project_id], references: [id], onDelete: CASCADE)
-  creator            User            @relation("CreatedBy", fields: [created_by], references: [id])
-  dependent_milestone Milestone?      @relation("MilestoneDependency", fields: [depends_on], references: [id])
-  boq_items          BoQItem[]
-  transactions       Transaction[]
-  inspections        Inspection[]
-  disputes           Dispute[]
-  progress_photos    ProgressPhoto[]
+  project            Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  engineer           User            @relation("CreatedBy", fields: [engineerId], references: [id])
+  dependentMilestone Milestone?      @relation("MilestoneDependency", fields: [dependsOn], references: [id])
   
-  @@index([project_id])
+  boqItems           BoqItem[]
+  inspections        Inspection[]
+  rfqs               Rfq[]
+  transactions       Transaction[]
+  progressPhotos     ProgressPhoto[]
+  disputes           Dispute[]
+
+  @@index([projectId])
+  @@index([engineerId])
   @@index([status])
-  @@index([depends_on])
+  @@index([dependsOn])
   @@map("milestones")
 }
 
 // ============================================================================
-// TABLE 9: boq_items
+// TABLE 11: BoqItem
 // ============================================================================
 
-model BoQItem {
-  id           String   @id @default(uuid())
-  milestone_id String
-  category     String   // concrete, steel, timber, finishes, labor, equipment
-  material     String
-  quantity     Float
-  unit         String   // bags, cubic_meters, pieces, lumpsum
-  unit_price   Int      // RWF
-  total_price  Int      // calculated: quantity * unit_price
-  actual_cost  Int?     // Actual cost after purchase
-  notes        String?
-  created_at   DateTime @default(now())
-  updated_at   DateTime @updatedAt
+model BoqItem {
+  id          String    @id @default(uuid())
+  milestoneId String
+  category    String
+  name        String
+  quantity    Decimal   @db.Decimal(10, 2)
+  unit        String
+  unitPrice   Decimal   @db.Decimal(15, 2)
+  totalPrice  Decimal   @db.Decimal(15, 2)
+  actualCost  Decimal?  @db.Decimal(15, 2)
+  notes       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
   
-  milestone    Milestone @relation(fields: [milestone_id], references: [id], onDelete: CASCADE)
+  milestone   Milestone @relation(fields: [milestoneId], references: [id], onDelete: Cascade)
   
-  @@index([milestone_id])
+  @@index([milestoneId])
   @@map("boq_items")
 }
 
 // ============================================================================
-// TABLE 10: escrow_accounts
+// TABLE 12: EscrowAccount
 // ============================================================================
 
 model EscrowAccount {
   id             String   @id @default(uuid())
-  project_id     String   @unique
-  balance        Int      @default(0)      // Available balance in RWF
-  locked_balance Int      @default(0)      // Balance in dispute
+  projectId      String   @unique
+  balance        Decimal  @default(0) @db.Decimal(15, 2)
+  lockedBalance  Decimal  @default(0) @db.Decimal(15, 2)
   currency       String   @default("RWF")
-  created_at     DateTime @default(now())
-  updated_at     DateTime @updatedAt
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
   
-  project        Project  @relation(fields: [project_id], references: [id], onDelete: CASCADE)
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   transactions   Transaction[]
   
   @@map("escrow_accounts")
 }
 
 // ============================================================================
-// TABLE 11: transactions
+// TABLE 13: Transaction
 // ============================================================================
 
 model Transaction {
-  id                 String          @id @default(uuid())
-  project_id         String
-  escrow_account_id  String
-  milestone_id       String?
-  amount             Int
-  type               TransactionType
-  status             TransactionStatus @default(pending)
-  reference_id       String?         // MTN transaction ID, bank reference
-  description        String?
-  actor_id           String          // User who initiated
-  metadata           Json?           // Additional data (webhook response, etc.)
-  created_at         DateTime        @default(now())
-  completed_at       DateTime?
+  id               String            @id @default(uuid())
+  escrowAccountId  String
+  milestoneId      String?
+  actorId          String
+  type             TransactionType
+  method           PaymentMethod?
+  amount           Decimal           @db.Decimal(15, 2)
+  status           TransactionStatus @default(pending)
+  reference        String?
+  metadata         Json?
+  completedAt      DateTime?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
   
-  project            Project         @relation(fields: [project_id], references: [id])
-  escrow_account     EscrowAccount   @relation(fields: [escrow_account_id], references: [id])
-  milestone          Milestone?      @relation(fields: [milestone_id], references: [id])
-  actor              User            @relation(fields: [actor_id], references: [id])
+  escrowAccount    EscrowAccount     @relation(fields: [escrowAccountId], references: [id])
+  milestone        Milestone?        @relation(fields: [milestoneId], references: [id])
+  actor            User              @relation(fields: [actorId], references: [id])
   
-  @@index([project_id])
-  @@index([escrow_account_id])
-  @@index([milestone_id])
-  @@index([actor_id])
+  @@index([escrowAccountId])
+  @@index([milestoneId])
+  @@index([actorId])
   @@index([status])
-  @@index([created_at])
   @@map("transactions")
 }
 
 // ============================================================================
-// TABLE 12: rfqs (Request for Quotes)
+// TABLE 14: Rfq
 // ============================================================================
 
-model RFQ {
-  id               String   @id @default(uuid())
-  project_id       String
-  milestone_id     String
-  engineer_id      String
-  title            String
-  material_spec    Json     // JSONB with material requirements
-  quantity         Float
-  unit             String
-  delivery_deadline DateTime
-  status           String   @default("open") // open, closed, awarded, expired
-  created_at       DateTime @default(now())
-  expires_at       DateTime
+model Rfq {
+  id              String    @id @default(uuid())
+  projectId       String
+  milestoneId     String
+  engineerId      String
+  title           String
+  specs           Json      @default("{}")
+  quantity        Decimal   @db.Decimal(10, 2)
+  unit            String
+  deadline        DateTime
+  status          RfqStatus @default(open)
+  expiresAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  project         Project   @relation(fields: [projectId], references: [id])
+  milestone       Milestone @relation(fields: [milestoneId], references: [id])
+  engineer        User      @relation("RFQCreatedBy", fields: [engineerId], references: [id])
   
-  project          Project  @relation(fields: [project_id], references: [id])
-  milestone        Milestone @relation(fields: [milestone_id], references: [id])
-  engineer         User     @relation("RFQCreatedBy", fields: [engineer_id], references: [id])
-  quotes           Quote[]
-  purchase_order   PurchaseOrder?
-  
-  @@index([project_id])
-  @@index([milestone_id])
+  quotes          Quote[]
+  purchaseOrder   PurchaseOrder?
+
+  @@index([projectId])
+  @@index([milestoneId])
   @@index([status])
   @@map("rfqs")
 }
 
 // ============================================================================
-// TABLE 13: quotes
+// TABLE 15: Quote
 // ============================================================================
 
 model Quote {
-  id             String   @id @default(uuid())
-  rfq_id         String
-  supplier_id    String
-  unit_price     Int
-  total_price    Int
-  delivery_days  Int
+  id             String      @id @default(uuid())
+  rfqId          String
+  supplierId     String
+  unitPrice      Decimal     @db.Decimal(15, 2)
+  totalPrice     Decimal     @db.Decimal(15, 2)
+  deliveryDays   Int
+  warrantyMonths Int?
   terms          String?
-  status         String   @default("pending") // pending, selected, rejected, expired
-  certificate_urls Json?   // Array of Cloudinary URLs
-  submitted_at   DateTime @default(now())
-  selected_at    DateTime?
-  
-  rfq            RFQ      @relation(fields: [rfq_id], references: [id])
-  supplier       User     @relation("QuoteSubmittedBy", fields: [supplier_id], references: [id])
-  purchase_order PurchaseOrder?
-  
-  @@index([rfq_id])
-  @@index([supplier_id])
+  certUrls       Json        @default("[]")
+  status         QuoteStatus @default(pending_selection)
+  selectedAt     DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  rfq            Rfq         @relation(fields: [rfqId], references: [id])
+  supplier       User        @relation("QuoteSubmittedBy", fields: [supplierId], references: [id])
+  purchaseOrder  PurchaseOrder?
+
+  @@index([rfqId])
+  @@index([supplierId])
   @@index([status])
   @@map("quotes")
 }
 
 // ============================================================================
-// TABLE 14: purchase_orders
+// TABLE 16: PurchaseOrder
 // ============================================================================
 
 model PurchaseOrder {
-  id              String   @id @default(uuid())
-  quote_id        String   @unique
-  rfq_id          String
-  po_number       String   @unique
-  cloudinary_url  String   // PDF stored on Cloudinary
-  status          String   @default("issued") // issued, accepted, shipped, completed
-  issued_at       DateTime @default(now())
-  accepted_at     DateTime?
-  completed_at    DateTime?
-  
-  quote           Quote    @relation(fields: [quote_id], references: [id])
-  rfq             RFQ      @relation(fields: [rfq_id], references: [id])
-  deliveries      Delivery[]
-  
-  @@index([po_number])
+  id             String              @id @default(uuid())
+  rfqId          String              @unique
+  quoteId        String              @unique
+  supplierId     String
+  poNumber       String              @unique
+  cloudinaryUrl  String
+  status         PurchaseOrderStatus @default(issued)
+  issuedAt       DateTime            @default(now())
+  acceptedAt     DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  rfq            Rfq                 @relation(fields: [rfqId], references: [id])
+  quote          Quote               @relation(fields: [quoteId], references: [id])
+  supplier       User                @relation(fields: [supplierId], references: [id])
+  deliveries     Delivery[]
+
+  @@index([supplierId])
   @@index([status])
   @@map("purchase_orders")
 }
 
 // ============================================================================
-// TABLE 15: deliveries
+// TABLE 17: Delivery
 // ============================================================================
 
 model Delivery {
-  id                 String   @id @default(uuid())
-  purchase_order_id  String
-  supplier_id        String
-  engineer_id        String?
-  supervisor_id      String?
-  start_gps          Json     // { lat, lng, timestamp }
-  end_gps            Json     // { lat, lng, timestamp }
-  photos             Json     // Array of Cloudinary URLs
-  status             String   @default("in_transit") // in_transit, delivered, confirmed, rejected
-  started_at         DateTime @default(now())
-  delivered_at       DateTime?
-  confirmed_at       DateTime?
-  rejection_reason   String?
-  created_at         DateTime @default(now())
-  
-  purchase_order     PurchaseOrder @relation(fields: [purchase_order_id], references: [id])
-  supplier           User          @relation(fields: [supplier_id], references: [id])
-  engineer           User?         @relation(fields: [engineer_id], references: [id])
-  supervisor         User?         @relation(fields: [supervisor_id], references: [id])
-  
-  @@index([purchase_order_id])
-  @@index([supplier_id])
+  id              String         @id @default(uuid())
+  purchaseOrderId String
+  supplierId      String
+  status          DeliveryStatus @default(preparing)
+  startGps        Json?
+  endGps          Json?
+  proofPhotos     Json           @default("[]")
+  notes           String?
+  rejectionReason String?
+  startedAt       DateTime?
+  arrivedAt       DateTime?
+  confirmedAt     DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  purchaseOrder   PurchaseOrder  @relation(fields: [purchaseOrderId], references: [id])
+  supplier        User           @relation(fields: [supplierId], references: [id])
+
+  @@index([purchaseOrderId])
+  @@index([supplierId])
   @@index([status])
   @@map("deliveries")
 }
 
 // ============================================================================
-// TABLE 16: progress_photos
+// TABLE 18: ProgressPhoto
 // ============================================================================
 
 model ProgressPhoto {
-  id            String   @id @default(uuid())
-  project_id    String
-  milestone_id  String?
-  uploaded_by   String
-  cloudinary_url String
-  cloudinary_public_id String
-  gps_location  Json?    // { lat, lng } from device
-  caption       String?
-  is_video      Boolean  @default(false)
-  video_duration Int?    // seconds, max 120
-  created_at    DateTime @default(now())
-  
-  project       Project  @relation(fields: [project_id], references: [id])
-  milestone     Milestone? @relation(fields: [milestone_id], references: [id])
-  uploader      User     @relation(fields: [uploaded_by], references: [id])
-  
-  @@index([project_id])
-  @@index([milestone_id])
-  @@index([uploaded_by])
-  @@index([created_at])
+  id                 String    @id @default(uuid())
+  projectId          String
+  milestoneId        String?
+  uploadedById       String
+  cloudinaryUrl      String
+  cloudinaryPublicId String
+  gpsLocation        Json?
+  caption            String?
+  isVideo            Boolean   @default(false)
+  videoDuration      Int?
+  createdAt          DateTime  @default(now())
+
+  project            Project   @relation(fields: [projectId], references: [id])
+  milestone          Milestone? @relation(fields: [milestoneId], references: [id])
+  uploadedBy         User      @relation(fields: [uploadedById], references: [id])
+
+  @@index([projectId])
+  @@index([milestoneId])
+  @@index([createdAt])
   @@map("progress_photos")
 }
 
 // ============================================================================
-// TABLE 17: inspections
+// TABLE 19: Inspection
 // ============================================================================
 
 model Inspection {
-  id             String   @id @default(uuid())
-  milestone_id   String   @unique
-  supervisor_id  String
-  checklist      Json     // JSONB of Q&A pairs
-  rating         Int      // 1-5 overall rating
-  photos         Json     // Array of Cloudinary URLs
-  signature_url  String   // Cloudinary URL of signature image
-  notes          String?
-  status         String   @default("pending") // pending, approved, rejected
-  submitted_at   DateTime @default(now())
-  
-  milestone      Milestone @relation(fields: [milestone_id], references: [id])
-  supervisor     User      @relation(fields: [supervisor_id], references: [id])
-  
-  @@index([milestone_id])
-  @@index([supervisor_id])
-  @@index([status])
+  id            String              @id @default(uuid())
+  milestoneId   String
+  supervisorId  String
+  checklist     Json                @default("{}")
+  photos        Json                @default("[]")
+  rating        Int?
+  signatureUrl  String?
+  notes         String?
+  decision      InspectionDecision?
+  attemptNumber Int                 @default(1)
+  signedAt      DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  milestone     Milestone           @relation(fields: [milestoneId], references: [id])
+  supervisor    User                @relation(fields: [supervisorId], references: [id])
+
+  @@unique([milestoneId, attemptNumber])
+  @@index([milestoneId])
+  @@index([supervisorId])
   @@map("inspections")
 }
 
 // ============================================================================
-// TABLE 18: disputes
+// TABLE 20: Dispute
 // ============================================================================
 
 model Dispute {
-  id               String        @id @default(uuid())
-  project_id       String
-  milestone_id     String?
-  raised_by        String
-  against_user_id  String?
-  category         String        // quality, timeline, cost, other
-  description      String
-  status           DisputeStatus @default(open)
-  amount_in_dispute Int          // RWF amount locked
-  resolved_at      DateTime?
-  resolved_by      String?
-  decision         Json?         // JSONB with resolution details
-  created_at       DateTime      @default(now())
+  id              String          @id @default(uuid())
+  projectId       String
+  milestoneId     String?
+  raisedById      String
+  category        DisputeCategory
+  description     String
+  status          DisputeStatus   @default(open)
+  amountInDispute Decimal         @db.Decimal(15, 2)
+  resolution      Json?
+  resolvedAt      DateTime?
+  resolvedBy      String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  project         Project         @relation(fields: [projectId], references: [id])
+  milestone       Milestone?      @relation(fields: [milestoneId], references: [id])
+  raisedBy        User            @relation("DisputeRaisedBy", fields: [raisedById], references: [id])
   
-  project          Project       @relation(fields: [project_id], references: [id])
-  milestone        Milestone?    @relation(fields: [milestone_id], references: [id])
-  raised_by_user   User          @relation("DisputeRaisedBy", fields: [raised_by], references: [id])
-  evidence         DisputeEvidence[]
-  
-  @@index([project_id])
-  @@index([milestone_id])
+  evidence        DisputeEvidence[]
+
+  @@index([projectId])
+  @@index([milestoneId])
   @@index([status])
   @@map("disputes")
 }
 
 // ============================================================================
-// TABLE 19: dispute_evidence
+// TABLE 21: DisputeEvidence
 // ============================================================================
 
 model DisputeEvidence {
   id             String   @id @default(uuid())
-  dispute_id     String
-  uploaded_by    String
-  cloudinary_url String
+  disputeId      String
+  uploadedById   String
+  cloudinaryUrl  String
   description    String?
-  uploaded_at    DateTime @default(now())
-  
-  dispute        Dispute  @relation(fields: [dispute_id], references: [id], onDelete: CASCADE)
-  uploader       User     @relation(fields: [uploaded_by], references: [id])
-  
-  @@index([dispute_id])
+  createdAt      DateTime @default(now())
+
+  dispute        Dispute  @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  uploadedBy     User     @relation(fields: [uploadedById], references: [id])
+
+  @@index([disputeId])
   @@map("dispute_evidence")
 }
 
 // ============================================================================
-// TABLE 20: audit_logs
+// TABLE 22: Message
 // ============================================================================
 
-model AuditLog {
-  id                String   @id @default(uuid())
-  actor_id          String?
-  action            String   // login, logout, kyc_approve, payment_release, dispute_open
-  entity_type       String   // user, project, milestone, escrow, dispute
-  entity_id         String?
-  old_values        Json?
-  new_values        Json?
-  ip_address        String?
-  user_agent        String?
-  device_fingerprint String?
-  result            String   // success, failure, partial
-  created_at        DateTime @default(now())
-  
-  actor             User?    @relation(fields: [actor_id], references: [id])
-  
-  @@index([actor_id])
-  @@index([entity_type, entity_id])
-  @@index([created_at])
-  @@map("audit_logs")
+model Message {
+  id         String   @id @default(uuid())
+  projectId  String
+  senderId   String
+  content    String
+  photoUrl   String?
+  createdAt  DateTime @default(now())
+
+  project    Project  @relation(fields: [projectId], references: [id])
+  sender     User     @relation(fields: [senderId], references: [id])
+
+  @@index([projectId])
+  @@index([senderId])
+  @@map("messages")
 }
 
 // ============================================================================
-// TABLE 21: notifications
+// TABLE 23: Notification
 // ============================================================================
 
 model Notification {
   id             String             @id @default(uuid())
-  user_id        String
+  userId         String
   channel        NotificationChannel
   title          String
   body           String
-  data           Json?              // Additional payload
+  data           Json               @default("{}")
   status         NotificationStatus @default(pending)
-  sent_at        DateTime?
-  delivered_at   DateTime?
-  read_at        DateTime?
-  failure_reason String?
-  created_at     DateTime           @default(now())
-  
-  user           User               @relation(fields: [user_id], references: [id], onDelete: CASCADE)
-  
-  @@index([user_id])
+  sentAt         DateTime?
+  deliveredAt    DateTime?
+  readAt         DateTime?
+  failureReason  String?
+  createdAt      DateTime           @default(now())
+
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
   @@index([status])
-  @@index([created_at])
+  @@index([createdAt])
   @@map("notifications")
 }
 
 // ============================================================================
-// TABLE 22: api_keys (for supplier/external integration)
+// TABLE 24: AuditLog
 // ============================================================================
 
-model ApiKey {
-  id             String   @id @default(uuid())
-  user_id        String
-  name           String
-  key_hash       String   @unique
-  prefix         String   // First 8 chars for identification
-  permissions    Json     // Array of allowed actions
-  expires_at     DateTime?
-  last_used_at   DateTime?
-  created_at     DateTime @default(now())
-  revoked_at     DateTime?
-  
-  user           User     @relation(fields: [user_id], references: [id], onDelete: CASCADE)
-  
-  @@index([user_id])
-  @@index([key_hash])
-  @@map("api_keys")
+model AuditLog {
+  id          String   @id @default(uuid())
+  actorId     String?
+  action      String
+  entityType  String
+  entityId    String?
+  oldValues   Json?
+  newValues   Json?
+  ipAddress   String?
+  userAgent   String?
+  result      String
+  createdAt   DateTime @default(now())
+
+  projectId   String?
+  project     Project? @relation(fields: [projectId], references: [id])
+  actor       User?    @relation(fields: [actorId], references: [id])
+
+  @@index([actorId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
 }
 
 // ============================================================================
-// TABLE 23: activity_logs (lighter than audit_logs for user activity)
+// TABLE 25: ActivityLog
 // ============================================================================
 
 model ActivityLog {
   id         String   @id @default(uuid())
-  user_id    String
-  action     String   // viewed_project, uploaded_photo, etc.
+  userId     String
+  action     String
   metadata   Json?
-  ip_address String?
-  created_at DateTime @default(now())
-  
-  user       User     @relation(fields: [user_id], references: [id], onDelete: CASCADE)
-  
-  @@index([user_id])
-  @@index([created_at])
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
   @@map("activity_logs")
 }
 
 // ============================================================================
-// TABLE 24: system_settings
+// TABLE 26: ApiKey
+// ============================================================================
+
+model ApiKey {
+  id          String    @id @default(uuid())
+  userId      String
+  name        String
+  keyHash     String    @unique
+  prefix      String
+  permissions Json      @default("[]")
+  expiresAt   DateTime?
+  lastUsedAt  DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("api_keys")
+}
+
+// ============================================================================
+// TABLE 27: SystemSetting
 // ============================================================================
 
 model SystemSetting {
-  id           String   @id @default(uuid())
-  key          String   @unique
-  value        Json
-  description  String?
-  updated_by   String?
-  updated_at   DateTime @updatedAt
-  created_at   DateTime @default(now())
-  
+  id          String   @id @default(uuid())
+  key         String   @unique
+  value       Json
+  description String?
+  updatedBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
   @@map("system_settings")
 }
 
 // ============================================================================
-// TABLE 25: email_templates
+// TABLE 28: EmailTemplate
 // ============================================================================
 
 model EmailTemplate {
-  id           String   @id @default(uuid())
-  name         String   @unique  // kyc_approval, payment_receipt, etc.
-  subject      String
-  html_content String
-  plain_text   String?
-  updated_at   DateTime @updatedAt
-  created_at   DateTime @default(now())
-  
+  id          String   @id @default(uuid())
+  name        String   @unique
+  subject     String
+  htmlContent String
+  plainText   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
   @@map("email_templates")
 }
 ```
 
----
-
-## Part 3: API Structure (REST Endpoints)
-
-### 3.1 API Versioning Strategy
+## Entity Relationship Diagram (ERD)
 
 ```
-Base URL: https://api.inkingipro.com/api/v1/
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              INKINGIPRO DATABASE ERD                                  │
+│                                   Version 1.0                                         │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 
-All endpoints require JWT Bearer token except:
-- /auth/*
-- /webhooks/*
-- /health
+                                    ┌─────────────┐
+                                    │    User     │
+                                    │─────────────│
+                                    │ id (PK)     │
+                                    │ name        │
+                                    │ email       │
+                                    │ phoneNumber │
+                                    │ role        │
+                                    │ kycStatus   │
+                                    └──────┬──────┘
+                                           │
+              ┌────────────────────────────┼────────────────────────────┐
+              │                            │                            │
+              ▼                            ▼                            ▼
+    ┌─────────────────┐          ┌─────────────────┐          ┌─────────────────┐
+    │    Session      │          │    Account      │          │  RefreshToken   │
+    │─────────────────│          │─────────────────│          │─────────────────│
+    │ id (PK)         │          │ id (PK)         │          │ id (PK)         │
+    │ userId (FK)─────┼──────────┼ userId (FK)─────┼──────────┼ userId (FK)─────┼───┐
+    │ token           │          │ providerId      │          │ token           │   │
+    │ expiresAt       │          │ accessToken     │          │ expiresAt       │   │
+    └─────────────────┘          └─────────────────┘          └─────────────────┘   │
+                                                                                     │
+    ┌─────────────────┐          ┌─────────────────┐          ┌─────────────────┐   │
+    │  Verification   │          │  PasswordReset  │          │   ApiKey        │   │
+    │─────────────────│          │─────────────────│          │─────────────────│   │
+    │ id (PK)         │          │ id (PK)         │          │ id (PK)         │   │
+    │ identifier      │          │ userId (FK)─────┼──────────┼ userId (FK)─────┼───┘
+    │ value           │          │ token           │          │ keyHash         │
+    │ expiresAt       │          │ expiresAt       │          │ permissions     │
+    └─────────────────┘          └─────────────────┘          └─────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                                    KYC DOMAIN                                        │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+                    ┌─────────────────┐
+                    │      User       │
+                    └────────┬────────┘
+                             │ 1
+                             │
+                             │ *
+                    ┌────────▼────────┐
+                    │  KycDocument    │
+                    │─────────────────│
+                    │ id (PK)         │
+                    │ userId (FK)     │
+                    │ type            │
+                    │ cloudinaryUrl   │
+                    │ status          │
+                    └─────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                                  PROJECT DOMAIN                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────┐                    ┌─────────────────┐
+    │      User       │                    │      User       │
+    │   (as Client)   │                    │  (as Engineer)  │
+    └────────┬────────┘                    └────────┬────────┘
+             │ 1                                     │ 0..1
+             │                                       │
+             │ ┌─────────────────────────────────────┘
+             │ │
+             ▼ ▼
+    ┌─────────────────┐          1..*      ┌─────────────────┐
+    │     Project     │───────────────────▶│  ProjectMember  │
+    │─────────────────│                    │─────────────────│
+    │ id (PK)         │                    │ id (PK)         │
+    │ clientId (FK)───┼────┐               │ projectId (FK)──┼────┐
+    │ engineerId (FK)─┼────┼───────────────│ userId (FK)──────┼────┼───┐
+    │ name            │    │               │ role            │    │   │
+    │ budget          │    │               │ status          │    │   │
+    │ status          │    │               └─────────────────┘    │   │
+    └────────┬────────┘    │                                       │   │
+             │             │                                       │   │
+             │ 1           │                                       │   │
+             │             │                                       │   │
+             ▼             ▼                                       │   │
+    ┌─────────────────┐ ┌─────────────────┐                        │   │
+    │   EscrowAccount │ │    Milestone    │◄───────────────────────┘   │
+    │─────────────────│ │─────────────────│                            │
+    │ id (PK)         │ │ id (PK)         │                            │
+    │ projectId (FK)──┼─│ projectId (FK)──┼────────────────────────────┘
+    │ balance         │ │ engineerId (FK) │
+    │ lockedBalance   │ │ name            │
+    └─────────────────┘ │ budgetPercentage│
+                        │ status          │
+                        └────────┬────────┘
+                                 │ 1
+                                 │
+                                 │ *
+                    ┌────────────▼────────────┐
+                    │                       │
+          ┌─────────┴─────────┐     ┌────────┴─────────┐
+          │                   │     │                  │
+    ┌─────▼─────┐       ┌──────▼──────┐       ┌────────▼────────┐
+    │  BoqItem  │       │ Transaction │       │  Inspection     │
+    │───────────│       │─────────────│       │────────────────│
+    │ id (PK)   │       │ id (PK)     │       │ id (PK)         │
+    │ milestone │       │ escrowAccId │       │ milestoneId(FK) │
+    │ name      │       │ milestoneId │       │ supervisorId    │
+    │ quantity  │       │ amount      │       │ decision        │
+    └───────────┘       │ type        │       └─────────────────┘
+                        └─────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                               SUPPLY CHAIN DOMAIN                                    │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────┐           ┌─────────────────┐
+    │    Milestone    │           │      User       │
+    │                 │           │   (Engineer)    │
+    └────────┬────────┘           └────────┬────────┘
+             │ 1                            │ 1
+             │                              │
+             ▼                              ▼
+    ┌─────────────────┐           ┌─────────────────┐
+    │       Rfq       │           │       Rfq       │
+    │─────────────────│           │─────────────────│
+    │ id (PK)         │           │ id (PK)         │
+    │ projectId (FK)  │           │ engineerId (FK) │
+    │ milestoneId(FK)─┼───────────│ title           │
+    │ engineerId (FK) │           │ specs           │
+    │ status          │           │ deadline        │
+    └────────┬────────┘           └─────────────────┘
+             │ 1
+             │
+             │ *
+    ┌────────▼────────┐
+    │     Quote       │
+    │─────────────────│
+    │ id (PK)         │
+    │ rfqId (FK)      │
+    │ supplierId (FK) │
+    │ unitPrice       │
+    │ status          │
+    └────────┬────────┘
+             │ 1
+             │
+             │ 1
+    ┌────────▼────────────┐
+    │   PurchaseOrder     │
+    │─────────────────────│
+    │ id (PK)             │
+    │ rfqId (FK)          │
+    │ quoteId (FK)        │
+    │ poNumber            │
+    │ cloudinaryUrl       │
+    │ status              │
+    └────────┬────────────┘
+             │ 1
+             │
+             │ *
+    ┌────────▼────────┐
+    │    Delivery     │
+    │─────────────────│
+    │ id (PK)         │
+    │ purchaseOrderId │
+    │ supplierId (FK) │
+    │ status          │
+    │ startGps        │
+    │ endGps          │
+    └─────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              PROGRESS & QUALITY DOMAIN                               │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────┐           ┌─────────────────┐
+    │     Project     │           │    Milestone    │
+    └────────┬────────┘           └────────┬────────┘
+             │ 1                            │ 1
+             │                              │
+             │ *                            │ *
+    ┌────────▼────────┐           ┌─────────▼─────────┐
+    │  ProgressPhoto  │           │   Inspection     │
+    │─────────────────│           │──────────────────│
+    │ id (PK)         │           │ id (PK)          │
+    │ projectId (FK)  │           │ milestoneId (FK) │
+    │ milestoneId(FK) │           │ supervisorId (FK)│
+    │ uploadedById(FK)│           │ checklist        │
+    │ cloudinaryUrl   │           │ rating           │
+    └─────────────────┘           └──────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                                 DISPUTE DOMAIN                                       │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────┐           ┌─────────────────┐
+    │     Project     │           │    Milestone    │
+    └────────┬────────┘           └────────┬────────┘
+             │ 1                            │ 0..1
+             │                              │
+             ▼                              ▼
+    ┌─────────────────┐           ┌─────────────────┐
+    │     Dispute     │           │     Dispute     │
+    │─────────────────│           │─────────────────│
+    │ id (PK)         │           │ id (PK)         │
+    │ projectId (FK)  │           │ milestoneId(FK) │
+    │ raisedById (FK) │           │ status          │
+    │ category        │           │ amountInDispute │
+    │ description     │           └────────┬────────┘
+    └────────┬────────┘                    │
+             │ 1                           │
+             │                             │ *
+             │ *                           │
+    ┌────────▼────────┐           ┌─────────▼─────────┐
+    │ DisputeEvidence │           │   DisputeEvidence │
+    │─────────────────│           │───────────────────│
+    │ id (PK)         │           │ id (PK)           │
+    │ disputeId (FK)  │           │ disputeId (FK)    │
+    │ uploadedById(FK)│           │ cloudinaryUrl     │
+    │ cloudinaryUrl   │           │ description       │
+    └─────────────────┘           └───────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              COMMUNICATION DOMAIN                                    │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────┐           ┌─────────────────┐
+    │     Project     │           │      User       │
+    └────────┬────────┘           └────────┬────────┘
+             │ 1                            │ 1
+             │                              │
+             │ *                            │ *
+    ┌────────▼────────┐           ┌─────────▼─────────┐
+    │     Message     │           │   Notification    │
+    │─────────────────│           │───────────────────│
+    │ id (PK)         │           │ id (PK)           │
+    │ projectId (FK)  │           │ userId (FK)       │
+    │ senderId (FK)   │           │ title             │
+    │ content         │           │ body              │
+    │ photoUrl        │           │ channel           │
+    └─────────────────┘           │ status            │
+                                  └───────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                                 LOGGING DOMAIN                                       │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────┐           ┌─────────────────┐
+    │      User       │           │     Project     │
+    └────────┬────────┘           └────────┬────────┘
+             │ 0..1                         │ 0..1
+             │                              │
+             ▼                              ▼
+    ┌─────────────────┐           ┌─────────────────┐
+    │    AuditLog     │           │    AuditLog     │
+    │─────────────────│           │─────────────────│
+    │ id (PK)         │           │ id (PK)         │
+    │ actorId (FK)────┼───────────│ projectId (FK)  │
+    │ action          │           │ entityType      │
+    │ entityType      │           │ entityId        │
+    │ oldValues       │           │ oldValues       │
+    │ newValues       │           │ newValues       │
+    └─────────────────┘           └─────────────────┘
+
+    ┌─────────────────┐
+    │  ActivityLog    │
+    │─────────────────│
+    │ id (PK)         │
+    │ userId (FK)─────┼───┐
+    │ action          │   │
+    │ metadata        │   │
+    │ ipAddress       │   │
+    └─────────────────┘   │
+                          │
+    ┌─────────────────┐   │
+    │      User       │   │
+    └─────────────────┘   │
+                          │
+    ┌─────────────────┐   │
+    │   SystemSetting │   │
+    │─────────────────│   │
+    │ id (PK)         │   │
+    │ key             │   │
+    │ value           │   │
+    └─────────────────┘   │
+                          │
+    ┌─────────────────┐   │
+    │  EmailTemplate  │   │
+    │─────────────────│   │
+    │ id (PK)         │   │
+    │ name            │   │
+    │ subject         │   │
+    │ htmlContent     │   │
+    └─────────────────┘   │
+                          │
+                          │
+                     ┌────┴────┐
+                     │  User   │
+                     └─────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              LEGEND                                                  │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│  PK  = Primary Key                                                                   │
+│  FK  = Foreign Key                                                                   │
+│  1   = One-to-One relationship                                                       │
+│  *   = Many-to-Many relationship                                                     │
+│  0..1= Zero or One relationship                                                      │
+│  1..*= One to Many relationship                                                      │
+│  ────= Foreign Key relationship                                                      │
+│  ─ ─ = Optional relationship                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 Complete API Routes Table
+## Data Flow Diagram (DFD) - Level 0 (Context Diagram)
 
-| Method | Endpoint | Description | Request Body | Response | Auth Role |
-|--------|----------|-------------|--------------|----------|-----------|
-| **AUTHENTICATION** |
-| POST | `/auth/register` | Register new user | `{email, phone, password, full_name, role}` | `{user_id, message}` | None |
-| POST | `/auth/verify-email` | Verify email OTP | `{email, otp}` | `{verified: true}` | None |
-| POST | `/auth/verify-phone` | Verify phone OTP | `{phone, otp}` | `{verified: true}` | None |
-| POST | `/auth/login` | Login with email/password | `{email, password}` | `{access_token, refresh_token, user}` | None |
-| POST | `/auth/login/otp` | Login with phone OTP | `{phone}` | `{message: "OTP sent"}` | None |
-| POST | `/auth/verify-otp-login` | Verify OTP and login | `{phone, otp}` | `{access_token, refresh_token, user}` | None |
-| POST | `/auth/refresh` | Refresh access token | `{refresh_token}` | `{access_token}` | None |
-| POST | `/auth/logout` | Logout user | None | `{message: "Logged out"}` | All |
-| POST | `/auth/forgot-password` | Request password reset | `{email}` | `{message: "OTP sent"}` | None |
-| POST | `/auth/reset-password` | Reset password with OTP | `{email, otp, new_password}` | `{message: "Password updated"}` | None |
-| GET | `/auth/me` | Get current user profile | None | `{user}` | All |
-| PUT | `/auth/me` | Update profile | `{full_name, phone, locale}` | `{user}` | All |
-| POST | `/auth/change-password` | Change password | `{current_password, new_password}` | `{message: "Password updated"}` | All |
-| **KYC MANAGEMENT** |
-| POST | `/kyc/upload-url` | Get signed Cloudinary URL | `{document_type}` | `{url, public_id, folder}` | All |
-| POST | `/kyc/documents` | Save KYC document | `{document_type, cloudinary_url, public_id}` | `{document_id}` | All |
-| GET | `/kyc/status` | Get user KYC status | None | `{status, documents[]}` | All |
-| GET | `/admin/kyc/pending` | List pending KYC submissions | Query: `?page=1&limit=20` | `{users[], total}` | Admin |
-| GET | `/admin/kyc/:userId` | Get KYC details for user | None | `{user, documents[]}` | Admin |
-| POST | `/admin/kyc/:userId/approve` | Approve KYC | `{notes?}` | `{message: "Approved"}` | Admin |
-| POST | `/admin/kyc/:userId/reject` | Reject KYC | `{reason}` | `{message: "Rejected"}` | Admin |
-| POST | `/admin/kyc/:userId/request-info` | Request additional documents | `{request_message}` | `{message: "Request sent"}` | Admin |
-| **PROJECT MANAGEMENT** |
-| GET | `/projects` | List user's projects | Query: `?status=active&page=1&limit=20` | `{projects[], total}` | All |
-| POST | `/projects` | Create new project | `{name, budget, address, description, start_date?, end_date?}` | `{project}` | Client |
-| GET | `/projects/:id` | Get project details | None | `{project, milestones[], escrow_balance}` | Member |
-| PUT | `/projects/:id` | Update project | `{name, description, address}` | `{project}` | Client |
-| DELETE | `/projects/:id` | Soft delete project | None | `{message: "Deleted"}` | Client |
-| POST | `/projects/:id/invite` | Invite user to project | `{email, role}` (role: engineer/supervisor/supplier) | `{invitation_id}` | Client |
-| GET | `/projects/:id/members` | List project members | None | `{members[]}` | Member |
-| DELETE | `/projects/:id/members/:userId` | Remove member | None | `{message: "Removed"}` | Client |
-| GET | `/projects/:id/timeline` | Get progress timeline with photos | Query: `?limit=50` | `{photos[], inspections[]}` | Member |
-| **MILESTONES** |
-| GET | `/projects/:projectId/milestones` | List milestones | None | `{milestones[]}` | Member |
-| POST | `/projects/:projectId/milestones` | Create milestone | `{title, budget_percentage, duration_days?, acceptance_criteria?, depends_on?}` | `{milestone}` | Engineer |
-| PUT | `/milestones/:id` | Update milestone | `{title, budget_percentage, acceptance_criteria}` | `{milestone}` | Engineer |
-| DELETE | `/milestones/:id` | Delete milestone | None | `{message: "Deleted"}` | Engineer |
-| POST | `/milestones/:id/activate` | Client activates milestone | None | `{milestone}` | Client |
-| POST | `/milestones/:id/request-payment` | Engineer requests payment | `{completion_notes, photo_ids[]}` | `{payment_request}` | Engineer |
-| POST | `/milestones/:id/payment-decision` | Client decision on payment | `{decision: approve/reject/dispute, notes?}` | `{milestone, transaction?}` | Client |
-| GET | `/milestones/:id/inspection` | Get inspection for milestone | None | `{inspection}` | Member |
-| **BOQ (Bill of Quantities)** |
-| GET | `/milestones/:milestoneId/boq` | List BOQ items | None | `{items[]}` | Engineer, Client |
-| POST | `/milestones/:milestoneId/boq` | Create BOQ item | `{category, material, quantity, unit, unit_price}` | `{item}` | Engineer |
-| PUT | `/boq/:id` | Update BOQ item | `{quantity, unit_price}` | `{item}` | Engineer |
-| DELETE | `/boq/:id` | Delete BOQ item | None | `{message: "Deleted"}` | Engineer |
-| GET | `/boq/:milestoneId/export/pdf` | Export BOQ to PDF | None | PDF file | Engineer, Client |
-| GET | `/boq/:milestoneId/export/excel` | Export BOQ to Excel | None | XLSX file | Engineer, Client |
-| **ESCROW & PAYMENTS** |
-| GET | `/escrow/projects/:projectId/balance` | Get escrow balance | None | `{balance, locked_balance, total_deposited, total_released}` | Member |
-| POST | `/escrow/deposit/mtn` | Initiate MTN deposit | `{amount, phone_number}` | `{transaction_id, payment_reference}` | Client |
-| POST | `/escrow/deposit/airtel` | Initiate Airtel deposit | `{amount, phone_number}` | `{transaction_id, payment_reference}` | Client |
-| POST | `/escrow/deposit/bank` | Initiate bank transfer | `{amount, reference?}` | `{bank_details, transaction_id}` | Client |
-| GET | `/escrow/transactions` | List user transactions | Query: `?project_id=&page=1&limit=20` | `{transactions[], total}` | Member |
-| GET | `/escrow/transactions/:id` | Get transaction details | None | `{transaction}` | Member |
-| POST | `/webhooks/mtn` | MTN MoMo webhook | MTN payload | `{status: "received"}` | Public |
-| POST | `/webhooks/airtel` | Airtel webhook | Airtel payload | `{status: "received"}` | Public |
-| **SUPPLY CHAIN (RFQ/Quotes)** |
-| GET | `/projects/:projectId/rfqs` | List RFQs | Query: `?status=open` | `{rfqs[]}` | Engineer, Admin |
-| POST | `/projects/:projectId/rfqs` | Create RFQ | `{milestone_id, title, material_spec, quantity, unit, delivery_deadline}` | `{rfq}` | Engineer |
-| GET | `/rfqs/:id` | Get RFQ details | None | `{rfq, quotes[]}` | Member |
-| PUT | `/rfqs/:id` | Update RFQ | `{material_spec, quantity, delivery_deadline}` | `{rfq}` | Engineer |
-| POST | `/rfqs/:id/close` | Close RFQ (stop accepting quotes) | None | `{message: "Closed"}` | Engineer |
-| GET | `/rfqs/:id/quotes` | List quotes for RFQ | None | `{quotes[]}` | Engineer, Admin |
-| POST | `/rfqs/:id/quotes` | Supplier submit quote | `{unit_price, total_price, delivery_days, terms}` | `{quote}` | Supplier |
-| PUT | `/quotes/:id` | Update quote (before selection) | `{unit_price, delivery_days}` | `{quote}` | Supplier |
-| POST | `/quotes/:id/select` | Engineer selects quote | None | `{purchase_order}` | Engineer |
-| **PURCHASE ORDERS & DELIVERIES** |
-| GET | `/purchase-orders` | List purchase orders | Query: `?status=issued` | `{orders[]}` | Supplier, Engineer |
-| GET | `/purchase-orders/:id` | Get PO details | None | `{po, deliveries[]}` | Member |
-| GET | `/purchase-orders/:id/download` | Download PO PDF | None | PDF file | Member |
-| POST | `/deliveries` | Start delivery | `{purchase_order_id, start_gps}` | `{delivery}` | Supplier |
-| PUT | `/deliveries/:id/gps` | Update delivery GPS | `{current_gps}` | `{delivery}` | Supplier |
-| POST | `/deliveries/:id/complete` | Complete delivery | `{end_gps, photos[], notes?}` | `{delivery}` | Supplier |
-| POST | `/deliveries/:id/confirm` | Confirm delivery receipt | `{confirmed: true/false, rejection_reason?}` | `{delivery}` | Engineer, Supervisor |
-| **PROGRESS PHOTOS** |
-| GET | `/projects/:projectId/photos` | List progress photos | Query: `?milestone_id=&limit=50` | `{photos[]}` | Member |
-| POST | `/projects/:projectId/photos/upload-url` | Get signed URL for photo | `{milestone_id?}` | `{url, public_id, folder}` | Engineer |
-| POST | `/projects/:projectId/photos` | Save photo record | `{milestone_id?, cloudinary_url, public_id, gps_location?, caption?}` | `{photo}` | Engineer |
-| DELETE | `/photos/:id` | Delete photo | None | `{message: "Deleted"}` | Engineer, Admin |
-| **INSPECTIONS** |
-| GET | `/inspections/pending` | List pending inspections | None | `{inspections[]}` | Supervisor |
-| GET | `/inspections/:id` | Get inspection details | None | `{inspection}` | Member |
-| POST | `/inspections` | Submit inspection | `{milestone_id, checklist, rating, photos, signature, notes}` | `{inspection}` | Supervisor |
-| PUT | `/inspections/:id` | Update inspection (before submit) | `{checklist, rating, notes}` | `{inspection}` | Supervisor |
-| GET | `/inspections/:id/download` | Download inspection report PDF | None | PDF file | Member |
-| **DISPUTES** |
-| GET | `/projects/:projectId/disputes` | List project disputes | None | `{disputes[]}` | Member |
-| POST | `/disputes` | Initiate dispute | `{project_id, milestone_id?, category, description, amount_in_dispute}` | `{dispute}` | All |
-| GET | `/disputes/:id` | Get dispute details | None | `{dispute, evidence[]}` | Involved parties |
-| POST | `/disputes/:id/evidence` | Upload evidence | `{cloudinary_url, description}` | `{evidence}` | Involved parties |
-| PUT | `/disputes/:id/close` | Close dispute (withdraw) | None | `{message: "Closed"}` | Initiator |
-| POST | `/admin/disputes/:id/resolve` | Admin resolution | `{decision_type, amount_to_release?, penalty_amount?, notes}` | `{dispute, transaction?}` | Admin |
-| POST | `/disputes/:id/appeal` | Appeal decision | `{reason, new_evidence_urls?}` | `{appeal}` | Any party |
-| **NOTIFICATIONS** |
-| GET | `/notifications` | List user notifications | Query: `?status=unread&page=1&limit=20` | `{notifications[], total}` | All |
-| PUT | `/notifications/:id/read` | Mark as read | None | `{notification}` | All |
-| PUT | `/notifications/read-all` | Mark all as read | None | `{message: "All marked read"}` | All |
-| PUT | `/notifications/preferences` | Update preferences | `{email_enabled, push_enabled, sms_enabled}` | `{preferences}` | All |
-| **ADMIN ONLY** |
-| GET | `/admin/users` | List all users | Query: `?role=&kyc_status=&page=1&limit=20` | `{users[], total}` | Admin |
-| GET | `/admin/users/:id` | Get user details | None | `{user, kyc_documents[], projects[]}` | Admin |
-| POST | `/admin/users/:id/suspend` | Suspend user | `{reason, days?}` | `{message: "Suspended"}` | Admin |
-| POST | `/admin/users/:id/activate` | Activate suspended user | None | `{message: "Activated"}` | Admin |
-| GET | `/admin/audit-logs` | View audit logs | Query: `?action=&entity_type=&page=1&limit=50` | `{logs[], total}` | Admin |
-| GET | `/admin/reports/compliance` | Generate compliance report | Query: `?start_date=&end_date=&format=pdf` | PDF or JSON | Admin |
-| GET | `/admin/reports/financial` | Generate financial report | Query: `?period=month` | `{report}` | Admin |
-| GET | `/admin/reports/supplier-performance` | Supplier performance report | Query: `?supplier_id=&period=90d` | `{report}` | Admin |
-| GET | `/admin/stats/dashboard` | Dashboard statistics | None | `{kyc_pending, active_projects, disputes_open, total_escrow}` | Admin |
-| PUT | `/admin/settings` | Update system settings | `{key, value}` | `{setting}` | Admin |
-| GET | `/admin/settings` | Get all system settings | None | `{settings[]}` | Admin |
-| **SYSTEM** |
-| GET | `/health` | Health check | None | `{status: "ok", timestamp, services}` | Public |
-| GET | `/api/docs` | Swagger documentation | None | HTML | Public |
-
----
-
-## Part 4: Prisma Setup Commands
-
-```bash
-# 1. Install Prisma
-npm install @prisma/client
-npm install -D prisma
-
-# 2. Initialize Prisma
-npx prisma init
-
-# 3. Copy the schema above to prisma/schema.prisma
-
-# 4. Generate Prisma Client
-npx prisma generate
-
-# 5. Create migration
-npx prisma migrate dev --name init
-
-# 6. Push to production database
-npx prisma db push
-
-# 7. Open Prisma Studio to view data
-npx prisma studio
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                      │
+│                              ┌─────────────────────────┐                             │
+│                              │                         │                             │
+│                              │    INKINGIPRO SYSTEM    │                             │
+│                              │                         │                             │
+│                              └───────────┬─────────────┘                             │
+│                                          │                                           │
+│         ┌────────────────────────────────┼────────────────────────────────┐          │
+│         │                                │                                │          │
+│         ▼                                ▼                                ▼          │
+│   ┌───────────┐                   ┌───────────┐                   ┌───────────┐     │
+│   │  Client   │                   │ Engineer  │                   │ Supervisor│     │
+│   └───────────┘                   └───────────┘                   └───────────┘     │
+│                                                                                      │
+│   ┌───────────┐                   ┌───────────┐                   ┌───────────┐     │
+│   │ Supplier  │                   │   Admin   │                   │  Visitor  │     │
+│   └───────────┘                   └───────────┘                   └───────────┘     │
+│                                                                                      │
+│   External Entities:                                                                 │
+│   - Client: Creates projects, deposits funds, approves milestones                    │
+│   - Engineer: Creates BOQ, RFQs, manages milestones                                  │
+│   - Supervisor: Conducts inspections, reviews deliveries                             │
+│   - Supplier: Responds to RFQs, manages deliveries                                   │
+│   - Admin: Manages users, KYC, disputes, system settings                             │
+│   - Visitor: Views public info, registers as new user                                │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
----
+## Data Flow Diagram (DFD) - Level 1 (Major Processes)
 
-## Part 5: Environment Variables (.env)
-
-```env
-# Database
-DATABASE_URL="postgresql://user:password@localhost:5432/inkingipro"
-
-# JWT
-JWT_SECRET="your-secret-key-min-32-chars"
-JWT_REFRESH_SECRET="your-refresh-secret-min-32-chars"
-
-# Cloudinary
-CLOUDINARY_CLOUD_NAME="your-cloud-name"
-CLOUDINARY_API_KEY="your-api-key"
-CLOUDINARY_API_SECRET="your-api-secret"
-
-# Email (Nodemailer)
-SMTP_HOST="smtp.gmail.com"
-SMTP_PORT="587"
-SMTP_USER="noreply@inkingipro.com"
-SMTP_PASS="your-app-password"
-EMAIL_FROM="noreply@inkingipro.com"
-
-# Africa's Talking
-AFRICA_TALKING_API_KEY="your-api-key"
-AFRICA_TALKING_USERNAME="sandbox"
-AFRICA_TALKING_SENDER_ID="INKINGI"
-
-# MTN MoMo
-MTN_API_URL="https://sandbox.mtn.co.rw"
-MTN_CLIENT_ID="your-client-id"
-MTN_CLIENT_SECRET="your-client-secret"
-MTN_SUBSCRIPTION_KEY="your-subscription-key"
-
-# Airtel
-AIRTEL_API_URL="https://openapi.airtel.africa"
-AIRTEL_CLIENT_ID="your-client-id"
-AIRTEL_CLIENT_SECRET="your-client-secret"
-
-# Redis (optional for production)
-REDIS_URL="redis://localhost:6379"
-
-# Environment
-NODE_ENV="development"
-PORT="3000"
-API_VERSION="v1"
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                      │
+│                                    EXTERNAL ENTITIES                                 │
+│                                                                                      │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐       │
+│  │ Client  │  │Engineer │  │Supervisor│ │Supplier │  │ Admin   │  │Visitor  │       │
+│  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘       │
+│       │            │            │            │            │            │           │
+│       └────────────┴────────────┴────────────┴────────────┴────────────┘           │
+│                                          │                                           │
+│                                          ▼                                           │
+│                          ┌─────────────────────────────┐                            │
+│                          │                             │                            │
+│                          │         API GATEWAY         │                            │
+│                          │      (Authentication &      │                            │
+│                          │         Rate Limiting)      │                            │
+│                          │                             │                            │
+│                          └─────────────┬───────────────┘                            │
+│                                        │                                             │
+│         ┌──────────────────────────────┼──────────────────────────────┐             │
+│         │                              │                              │             │
+│         ▼                              ▼                              ▼             │
+│  ┌──────────────┐              ┌──────────────┐              ┌──────────────┐       │
+│  │ PROCESS 1    │              │ PROCESS 2    │              │ PROCESS 3    │       │
+│  │ User & KYC   │              │ Project &    │              │ Supply Chain │       │
+│  │ Management   │              │ Milestone    │              │ Management   │       │
+│  │              │              │ Management   │              │              │       │
+│  └──────┬───────┘              └──────┬───────┘              └──────┬───────┘       │
+│         │                             │                             │               │
+│         ▼                             ▼                             ▼               │
+│  ┌──────────────┐              ┌──────────────┐              ┌──────────────┐       │
+│  │ PROCESS 4    │              │ PROCESS 5    │              │ PROCESS 6    │       │
+│  │ Payment &    │              │ Quality &    │              │ Dispute &    │       │
+│  │ Escrow       │              │ Inspection   │              │ Resolution   │       │
+│  │              │              │              │              │              │       │
+│  └──────┬───────┘              └──────┬───────┘              └──────┬───────┘       │
+│         │                             │                             │               │
+│         └─────────────────────────────┼─────────────────────────────┘               │
+│                                       │                                             │
+│                                       ▼                                             │
+│                          ┌─────────────────────────────┐                            │
+│                          │                             │                            │
+│                          │       DATA STORES           │                            │
+│                          │                             │                            │
+│                          │  ┌─────────────────────┐    │                            │
+│                          │  │ PostgreSQL Database │    │                            │
+│                          │  │    (25 Tables)      │    │                            │
+│                          │  └─────────────────────┘    │                            │
+│                          │                             │                            │
+│                          │  ┌─────────────────────┐    │                            │
+│                          │  │     Cloudinary      │    │                            │
+│                          │  │   (Media Storage)   │    │                            │
+│                          │  └─────────────────────┘    │                            │
+│                          │                             │                            │
+│                          │  ┌─────────────────────┐    │                            │
+│                          │  │   Redis (Cache)     │    │                            │
+│                          │  │   & Session Store   │    │                            │
+│                          │  └─────────────────────┘    │                            │
+│                          │                             │                            │
+│                          └─────────────────────────────┘                            │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
----
+## Data Flow Diagram (DFD) - Level 2 (Process Details)
 
-## Part 6: Quick Reference Card
+### PROCESS 1: User & KYC Management
 
-### Database Table Count: 25 Tables
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                         PROCESS 1: USER & KYC MANAGEMENT                             │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│   ┌─────────┐    1.1 Register      ┌──────────────┐                                 │
+│   │ Visitor │─────────────────────▶│ Create User  │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│   ┌─────────┐    1.2 Login         ┌──────▼───────┐                                 │
+│   │  User   │─────────────────────▶│ Authenticate│                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│   ┌─────────┐    1.3 Upload KYC    ┌──────▼───────┐    ┌─────────────┐              │
+│   │  User   │─────────────────────▶│ Submit KYC  │───▶│ Cloudinary  │              │
+│   └─────────┘                       └──────┬───────┘    └─────────────┘              │
+│                                            │                                         │
+│   ┌─────────┐    1.4 Review KYC    ┌──────▼───────┐                                 │
+│   │ Admin   │─────────────────────▶│ Verify KYC  │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│                                            ▼                                         │
+│                                   ┌─────────────────┐                               │
+│                                   │   DATA STORES   │                               │
+│                                   │─────────────────│                               │
+│                                   │ • users         │                               │
+│                                   │ • sessions      │                               │
+│                                   │ • accounts      │                               │
+│                                   │ • refresh_tokens│                               │
+│                                   │ • kyc_documents │                               │
+│                                   └─────────────────┘                               │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
 
-| Category | Tables |
-|----------|--------|
-| **User Management** | users, user_sessions, refresh_tokens, password_resets, api_keys |
-| **KYC** | kyc_documents |
-| **Projects** | projects, project_members, milestones, boq_items |
-| **Financial** | escrow_accounts, transactions |
-| **Supply Chain** | rfqs, quotes, purchase_orders, deliveries |
-| **Media** | progress_photos |
-| **Quality** | inspections |
-| **Disputes** | disputes, dispute_evidence |
-| **Logging** | audit_logs, activity_logs, notifications |
-| **System** | system_settings, email_templates |
+### PROCESS 2: Project & Milestone Management
 
-### API Endpoints Count: 75+ Endpoints
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                      PROCESS 2: PROJECT & MILESTONE MANAGEMENT                       │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│   ┌─────────┐    2.1 Create        ┌──────────────┐                                 │
+│   │ Client  │─────────────────────▶│   Project    │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│   ┌─────────┐    2.2 Invite        ┌──────▼───────┐                                 │
+│   │ Client  │─────────────────────▶│ Add Member  │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│   ┌─────────┐    2.3 Create        ┌──────▼───────┐                                 │
+│   │Engineer │─────────────────────▶│ Milestone   │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│   ┌─────────┐    2.4 Create BOQ    ┌──────▼───────┐                                 │
+│   │Engineer │─────────────────────▶│  BOQ Items  │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│   ┌─────────┐    2.5 Activate      ┌──────▼───────┐                                 │
+│   │ Client  │─────────────────────▶│  Milestone  │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│                                            ▼                                         │
+│                                   ┌─────────────────┐                               │
+│                                   │   DATA STORES   │                               │
+│                                   │─────────────────│                               │
+│                                   │ • projects      │                               │
+│                                   │ • project_members│                              │
+│                                   │ • milestones    │                               │
+│                                   │ • boq_items     │                               │
+│                                   └─────────────────┘                               │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
 
-| Category | Count |
-|----------|-------|
-| Authentication | 12 |
-| KYC | 8 |
-| Projects | 9 |
-| Milestones | 8 |
-| BOQ | 6 |
-| Escrow/Payments | 8 |
-| Supply Chain | 9 |
-| Purchase Orders/Deliveries | 6 |
-| Progress Photos | 4 |
-| Inspections | 5 |
-| Disputes | 7 |
-| Notifications | 4 |
-| Admin | 10 |
-| System | 2 |
+### PROCESS 3: Supply Chain Management
 
----
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                         PROCESS 3: SUPPLY CHAIN MANAGEMENT                           │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│   ┌─────────┐    3.1 Create RFQ    ┌──────────────┐                                 │
+│   │Engineer │─────────────────────▶│     RFQ      │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│   ┌─────────┐    3.2 Submit Quote  ┌──────▼───────┐                                 │
+│   │Supplier │─────────────────────▶│    Quote    │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│   ┌─────────┐    3.3 Select Quote  ┌──────▼───────┐    ┌─────────────┐              │
+│   │Engineer │─────────────────────▶│Purchase Order│───▶│ Cloudinary  │              │
+│   └─────────┘                       └──────┬───────┘    └─────────────┘              │
+│                                            │                                         │
+│   ┌─────────┐    3.4 Start         ┌──────▼───────┐                                 │
+│   │Supplier │─────────────────────▶│  Delivery   │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│   ┌─────────┐    3.5 Confirm       ┌──────▼───────┐                                 │
+│   │Engineer │─────────────────────▶│  Delivery   │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│                                            ▼                                         │
+│                                   ┌─────────────────┐                               │
+│                                   │   DATA STORES   │                               │
+│                                   │─────────────────│                               │
+│                                   │ • rfqs          │                               │
+│                                   │ • quotes        │                               │
+│                                   │ • purchase_orders│                              │
+│                                   │ • deliveries    │                               │
+│                                   └─────────────────┘                               │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
 
-*This document replaces all previous database designs and provides the complete, production-ready schema for InkingiPro.*
+### PROCESS 4: Payment & Escrow Management
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                        PROCESS 4: PAYMENT & ESCROW MANAGEMENT                        │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│   ┌─────────┐    4.1 Deposit       ┌──────────────┐    ┌─────────────┐              │
+│   │ Client  │─────────────────────▶│   Payment    │───▶│ MTN/Airtel  │              │
+│   └─────────┘                       └──────┬───────┘    │   API       │              │
+│                                            │            └─────────────┘              │
+│   ┌─────────┐    4.2 Request       ┌──────▼───────┐                                 │
+│   │Engineer │─────────────────────▶│   Release   │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│   ┌─────────┐    4.3 Approve       ┌──────▼───────┐                                 │
+│   │ Client  │─────────────────────▶│   Release   │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│   ┌─────────┐    4.4 View          ┌──────▼───────┐                                 │
+│   │  User   │─────────────────────▶│ Transaction │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│                                            ▼                                         │
+│                                   ┌─────────────────┐                               │
+│                                   │   DATA STORES   │                               │
+│                                   │─────────────────│                               │
+│                                   │ • escrow_accounts│                              │
+│                                   │ • transactions  │                               │
+│                                   └─────────────────┘                               │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### PROCESS 5: Quality & Inspection Management
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                      PROCESS 5: QUALITY & INSPECTION MANAGEMENT                      │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│   ┌─────────┐    5.1 Upload        ┌──────────────┐    ┌─────────────┐              │
+│   │Engineer │─────────────────────▶│   Progress   │───▶│ Cloudinary  │              │
+│   └─────────┘                       │    Photo     │    └─────────────┘              │
+│                                     └──────┬───────┘                                 │
+│                                            │                                         │
+│   ┌─────────┐    5.2 Conduct       ┌──────▼───────┐                                 │
+│   │Supervisor─────────────────────▶│ Inspection  │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│   ┌─────────┐    5.3 View          ┌──────▼───────┐                                 │
+│   │ Client  │─────────────────────▶│  Inspection │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│                                            ▼                                         │
+│                                   ┌─────────────────┐                               │
+│                                   │   DATA STORES   │                               │
+│                                   │─────────────────│                               │
+│                                   │ • progress_photos│                              │
+│                                   │ • inspections   │                               │
+│                                   └─────────────────┘                               │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### PROCESS 6: Dispute & Resolution Management
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                      PROCESS 6: DISPUTE & RESOLUTION MANAGEMENT                      │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│   ┌─────────┐    6.1 Raise         ┌──────────────┐                                 │
+│   │  User   │─────────────────────▶│   Dispute    │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│   ┌─────────┐    6.2 Upload        ┌──────▼───────┐    ┌─────────────┐              │
+│   │  User   │─────────────────────▶│   Evidence   │───▶│ Cloudinary  │              │
+│   └─────────┘                       └──────┬───────┘    └─────────────┘              │
+│                                            │                                         │
+│   ┌─────────┐    6.3 Review        ┌──────▼───────┐                                 │
+│   │ Admin   │─────────────────────▶│   Dispute   │                                 │
+│   └─────────┘                       └──────┬───────┘                                 │
+│                                            │                                         │
+│   ┌─────────┐    6.4 Resolve       ┌──────▼───────┐    ┌─────────────┐              │
+│   │ Admin   │─────────────────────▶│ Resolution  │───▶│ Transaction │              │
+│   └─────────┘                       └──────┬───────┘    └─────────────┘              │
+│                                            │                                         │
+│                                            ▼                                         │
+│                                   ┌─────────────────┐                               │
+│                                   │   DATA STORES   │                               │
+│                                   │─────────────────│                               │
+│                                   │ • disputes      │                               │
+│                                   │ • dispute_evidence│                             │
+│                                   └─────────────────┘                               │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Table Relationship Summary
+
+| # | Table | Primary Key | Foreign Keys | Related Tables |
+|---|-------|-------------|--------------|----------------|
+| 1 | User | id | - | Session, Account, RefreshToken, PasswordReset, KycDocument, Project, ProjectMember, Milestone, Transaction, Rfq, Quote, PurchaseOrder, Delivery, ProgressPhoto, Inspection, Dispute, DisputeEvidence, Message, Notification, AuditLog, ActivityLog, ApiKey |
+| 2 | Session | id | userId | User |
+| 3 | Account | id | userId | User |
+| 4 | Verification | id | - | - |
+| 5 | RefreshToken | id | userId | User |
+| 6 | PasswordReset | id | userId | User |
+| 7 | KycDocument | id | userId | User |
+| 8 | Project | id | clientId, engineerId | User, ProjectMember, EscrowAccount, Milestone, Rfq, ProgressPhoto, Dispute, Message, AuditLog |
+| 9 | ProjectMember | id | projectId, userId | Project, User |
+| 10 | Milestone | id | projectId, engineerId, dependsOn | Project, User, BoqItem, Inspection, Rfq, Transaction, ProgressPhoto, Dispute |
+| 11 | BoqItem | id | milestoneId | Milestone |
+| 12 | EscrowAccount | id | projectId | Project, Transaction |
+| 13 | Transaction | id | escrowAccountId, milestoneId, actorId | EscrowAccount, Milestone, User |
+| 14 | Rfq | id | projectId, milestoneId, engineerId | Project, Milestone, User, Quote, PurchaseOrder |
+| 15 | Quote | id | rfqId, supplierId | Rfq, User, PurchaseOrder |
+| 16 | PurchaseOrder | id | rfqId, quoteId, supplierId | Rfq, Quote, User, Delivery |
+| 17 | Delivery | id | purchaseOrderId, supplierId | PurchaseOrder, User |
+| 18 | ProgressPhoto | id | projectId, milestoneId, uploadedById | Project, Milestone, User |
+| 19 | Inspection | id | milestoneId, supervisorId | Milestone, User |
+| 20 | Dispute | id | projectId, milestoneId, raisedById | Project, Milestone, User, DisputeEvidence |
+| 21 | DisputeEvidence | id | disputeId, uploadedById | Dispute, User |
+| 22 | Message | id | projectId, senderId | Project, User |
+| 23 | Notification | id | userId | User |
+| 24 | AuditLog | id | actorId, projectId | User, Project |
+| 25 | ActivityLog | id | userId | User |
+| 26 | ApiKey | id | userId | User |
+| 27 | SystemSetting | id | - | - |
+| 28 | EmailTemplate | id | - | - |
+
+## Key Relationships Explained
+
+### 1. User to Project
+- **One-to-Many**: A Client can have many Projects
+- **One-to-Many**: An Engineer can be assigned to many Projects
+- **Many-to-Many**: Users can be members of many Projects (via ProjectMember)
+
+### 2. Project to Milestone
+- **One-to-Many**: A Project has many Milestones
+- Milestones have dependencies (self-reference via `dependsOn`)
+
+### 3. Milestone to Escrow
+- **One-to-One**: Each Project has one EscrowAccount
+- **One-to-Many**: Each Milestone can have many Transactions
+
+### 4. Rfq to Quote to PurchaseOrder
+- **One-to-Many**: One Rfq has many Quotes
+- **One-to-One**: One Quote becomes one PurchaseOrder
+- **One-to-Many**: One PurchaseOrder has many Deliveries
+
+### 5. Dispute to Evidence
+- **One-to-Many**: One Dispute has many Evidence documents
+
+## Indexing Strategy
+
+```sql
+-- Critical indexes for performance
+CREATE INDEX idx_users_email ON users(email);
+CREATE INDEX idx_users_role ON users(role);
+CREATE INDEX idx_users_kyc_status ON users(kyc_status);
+
+CREATE INDEX idx_projects_client_id ON projects(client_id);
+CREATE INDEX idx_projects_engineer_id ON projects(engineer_id);
+CREATE INDEX idx_projects_status ON projects(status);
+
+CREATE INDEX idx_milestones_project_id ON milestones(project_id);
+CREATE INDEX idx_milestones_status ON milestones(status);
+
+CREATE INDEX idx_transactions_escrow_account_id ON transactions(escrow_account_id);
+CREATE INDEX idx_transactions_status ON transactions(status);
+
+CREATE INDEX idx_notifications_user_id ON notifications(user_id);
+CREATE INDEX idx_notifications_status ON notifications(status);
+
+CREATE INDEX idx_audit_logs_created_at ON audit_logs(created_at);
+```
+
+This comprehensive database architecture provides:
+
+1. **25+ tables** covering all business domains
+2. **Complete relationship mapping** with proper foreign keys
+3. **Visual ERD** showing all table connections
+4. **4-level DFD** showing data flow through the system
+5. **Indexing strategy** for performance optimization
+6. **Role-based access control** built into the schema
